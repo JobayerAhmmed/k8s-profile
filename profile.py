@@ -37,8 +37,8 @@ pc = portal.Context()
 #
 pc.defineParameter(
     "nodeCount","Number of Nodes",
-    portal.ParameterType.INTEGER,3,
-    longDescription="Number of nodes in your kubernetes cluster.  Should be either 1, or >= 3.")
+    portal.ParameterType.INTEGER,8,
+    longDescription="Number of nodes in your kubernetes cluster.  Should be either 1, or >= 3.  The default of 8 gives 3 control-plane nodes (node-0..node-2) and 5 workers (node-3..node-7).")
 pc.defineParameter(
     "nodeType","Hardware Type",
     portal.ParameterType.NODETYPE,"",
