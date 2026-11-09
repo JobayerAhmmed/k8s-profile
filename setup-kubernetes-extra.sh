@@ -128,8 +128,58 @@ if [ "$DOLOCALREGISTRY" = "1" ]; then
     $SUDO docker start local-registry
 fi
 
-# If the user wanted NFS, make a dynamic nfs subdir provisioner the default
-# storageclass.
+# If the user wanted the Local Path Provisioner, make it the default
+# storageclass.  The provisioner itself is stateless (volumes live on the
+# nodes that use them), so run it on the control plane, prefer the second
+# control-plane node, and let it fail over quickly to another one.
+if [ -n "$DOLOCALPATH" -a "$DOLOCALPATH" = "1" ]; then
+    LPPREFNODE=$HEAD
+    if [ $NODECOUNT -gt 1 -a -n "$CONTROLPLANECOUNT" ] \
+	&& [ $CONTROLPLANECOUNT -gt 1 ]; then
+	LPPREFNODE=`echo $NODES | cut -d ' ' -f2`
+    fi
+    curl -fsSL -o $OURDIR/local-path-storage.yaml \
+	https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCALPATHVERSION}/deploy/local-path-storage.yaml
+    if [ ! $? -eq 0 ]; then
+	echo "ERROR: failed to download local-path-provisioner ${LOCALPATHVERSION}; aborting"
+	exit 1
+    fi
+    sed -i -e "s|/opt/local-path-provisioner|$LOCALPATHDIR|" \
+	$OURDIR/local-path-storage.yaml
+    kubectl apply -f $OURDIR/local-path-storage.yaml
+    LPPATCH=$(cat <<EOF
+{"spec":{"template":{"spec":{
+  "affinity":{"nodeAffinity":{
+    "requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[
+      {"matchExpressions":[{"key":"node-role.kubernetes.io/control-plane","operator":"Exists"}]}]},
+    "preferredDuringSchedulingIgnoredDuringExecution":[
+      {"weight":100,"preference":{"matchExpressions":[
+        {"key":"kubernetes.io/hostname","operator":"In","values":["$LPPREFNODE"]}]}}]}},
+  "tolerations":[
+    {"key":"node-role.kubernetes.io/control-plane","operator":"Exists","effect":"NoSchedule"},
+    {"key":"node.kubernetes.io/not-ready","operator":"Exists","effect":"NoExecute","tolerationSeconds":30},
+    {"key":"node.kubernetes.io/unreachable","operator":"Exists","effect":"NoExecute","tolerationSeconds":30}]
+}}}}
+EOF
+)
+    kubectl -n local-path-storage patch deployment local-path-provisioner \
+	--type merge -p "$LPPATCH"
+    kubectl -n local-path-storage rollout status \
+	deployment/local-path-provisioner --timeout=300s
+    if [ ! $? -eq 0 ]; then
+	echo "ERROR: local-path-provisioner did not become ready; aborting"
+	exit 1
+    fi
+    kubectl patch storageclass local-path \
+	-p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+fi
+
+# If the user wanted NFS, install a dynamic nfs subdir provisioner; it is the
+# default storageclass only if local-path is not.
+NFSDEFAULTCLASS=true
+if [ -n "$DOLOCALPATH" -a "$DOLOCALPATH" = "1" ]; then
+    NFSDEFAULTCLASS=false
+fi
 if [ -n "$DONFS" -a "$DONFS" = "1" ]; then
     NFSSERVERIP=`getnodeip $HEAD $DATALAN`
     helm repo add nfs-subdir-external-provisioner \
@@ -142,7 +192,7 @@ nfs:
   mountOptions:
     - "nfsvers=3"
 storageClass:
-  defaultClass: true
+  defaultClass: $NFSDEFAULTCLASS
 EOF
     helm install nfs-subdir-external-provisioner \
         nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \

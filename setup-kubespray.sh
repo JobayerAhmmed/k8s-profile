@@ -125,13 +125,24 @@ for node in $NODES ; do
 
     touch $INVDIR/host_vars/$node.yml
 done
-# The first 2 nodes are kube-master (now kube_control_plane).
+# The first $CONTROLPLANECOUNT nodes are kube-master (now kube_control_plane).
+cpcount=$CONTROLPLANECOUNT
+if [ -z "$cpcount" ] || [ $cpcount -lt 1 ]; then
+    cpcount=1
+fi
+if [ $cpcount -gt $NODECOUNT ]; then
+    cpcount=$NODECOUNT
+fi
+CPNODES=`echo $NODES | cut -d ' ' -f-$cpcount`
 echo "[$ROLEMASTER]" >> $INV
-for node in `echo $NODES | cut -d ' ' -f-2` ; do
+for node in $CPNODES ; do
     echo "$node" >> $INV
 done
-# The first 3 nodes are etcd.
+# The first max(3, $cpcount) nodes are etcd (1 node if fewer than 3 nodes).
 etcdcount=3
+if [ $cpcount -gt $etcdcount ]; then
+    etcdcount=$cpcount
+fi
 if [ $NODECOUNT -lt 3 ]; then
     etcdcount=1
 fi
@@ -139,10 +150,12 @@ echo '[etcd]' >> $INV
 for node in `echo $NODES | cut -d ' ' -f-$etcdcount` ; do
     echo "$node" >> $INV
 done
-# The last 2--N nodes are kube-node (now kube_node), unless there is only one node, or
-# if user allows.
-kubenodecount=2
-if [ $KUBEALLWORKERS -eq 1 -o "$NODES" = `echo $NODES | cut -d ' ' -f2` ]; then
+# The nodes after the control plane are kube-node (now kube_node).  All
+# nodes are workers if there is only one node, if the user allows it, or if
+# the control plane would otherwise take every node.  Control-plane nodes
+# that are not in kube_node keep the control-plane NoSchedule taint.
+kubenodecount=`expr $cpcount + 1`
+if [ $KUBEALLWORKERS -eq 1 -o $NODECOUNT -eq 1 -o $cpcount -ge $NODECOUNT ]; then
     kubenodecount=1
 fi
 echo "[$ROLENODE]" >> $INV
@@ -525,6 +538,45 @@ $SUDO cp -p $INVDIR/artifacts/admin.conf /root/.kube/config
 mkdir -p /users/$SWAPPER/.kube
 cp -p $INVDIR/artifacts/admin.conf /users/$SWAPPER/.kube/config
 chown -R $SWAPPER /users/$SWAPPER/.kube
+
+#
+# Make every other control-plane node a full admin host too: kubectl, helm
+# (same binaries as on $HEAD), and a kubeconfig for root and $SWAPPER that
+# points at that node's own apiserver, so the cluster stays manageable from
+# any surviving control-plane node.
+#
+KUBECTLBIN=`which kubectl`
+HELMBIN=`which helm`
+for node in $CPNODES ; do
+    if [ "$node" = "$HEAD" ]; then
+	continue
+    fi
+    nodeip=`getnodeip $node $DATALAN`
+    $SCP $INVDIR/artifacts/admin.conf $KUBECTLBIN $HELMBIN $node:/tmp/
+    if [ ! $? -eq 0 ]; then
+	echo "ERROR: failed to copy kubeconfig/kubectl/helm to $node; aborting"
+	exit 1
+    fi
+    $SSH $node "sh -s" <<EOF
+set -ex
+sed -i -e 's|^\([[:space:]]*server:\).*\$|\1 https://$nodeip:6443|' /tmp/admin.conf
+which kubectl || sudo install -m 755 /tmp/kubectl /usr/local/bin/kubectl
+which helm || sudo install -m 755 /tmp/helm /usr/local/bin/helm
+sudo rm -rf /root/.kube
+sudo mkdir -p /root/.kube
+sudo install -m 600 /tmp/admin.conf /root/.kube/config
+rm -rf /users/$SWAPPER/.kube
+mkdir -p /users/$SWAPPER/.kube
+install -m 600 /tmp/admin.conf /users/$SWAPPER/.kube/config
+rm -f /tmp/admin.conf /tmp/kubectl /tmp/helm
+kubectl get nodes
+helm version
+EOF
+    if [ ! $? -eq 0 ]; then
+	echo "ERROR: failed to set up kubectl/helm on $node; aborting"
+	exit 1
+    fi
+done
 
 tries=60
 while [ $tries -gt 0 ]; do

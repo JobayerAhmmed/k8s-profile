@@ -107,6 +107,21 @@ pc.defineParameter(
     longDescription="Create a private Docker registry on the kube master, and expose it on the (private) management IP address, port 5000, and configure Kubernetes to be able to use it (--insecure-registry).  This is nearly mandatory for some development workflows, so it is on by default.",
     advanced=True)
 pc.defineParameter(
+    "doNFS","Create NFS Server and nfs-client StorageClass",
+    portal.ParameterType.BOOLEAN,False,
+    longDescription="Export an NFS share from node-0 (mounted at /nfs on every node) and install the nfs-subdir-external-provisioner as the `nfs-client` StorageClass (the default StorageClass only if Local Path Provisioner is disabled).  Off by default: the NFS server is a single point of failure on node-0.",
+    advanced=True)
+pc.defineParameter(
+    "doLocalPath","Install Local Path Provisioner",
+    portal.ParameterType.BOOLEAN,True,
+    longDescription="Install the Rancher Local Path Provisioner as the default `local-path` StorageClass.  Volumes are directories under /storage/local-path on the node where the pod runs.  The provisioner runs on the control plane (preferring node-1 when there are several control-plane nodes) and moves to another control-plane node if its node fails.",
+    advanced=True)
+pc.defineParameter(
+    "localPathVersion","Local Path Provisioner Version",
+    portal.ParameterType.STRING,"v0.0.36",
+    longDescription="A tag of https://github.com/rancher/local-path-provisioner ; its deploy/local-path-storage.yaml manifest is applied.",
+    advanced=True)
+pc.defineParameter(
     "kubeNetworkPlugin","Kubernetes Network Plugin",
     portal.ParameterType.STRING,"calico",
     [("calico","Calico"),("flannel","Flannel"),("weave","Weave")],
@@ -162,6 +177,11 @@ pc.defineParameter(
     "kubeAllWorkers","Kube Master is Worker",
     portal.ParameterType.BOOLEAN,False,
     longDescription="Allow the kube master to be a worker in the multi-node case (always true for single-node clusters); disabled by default.",
+    advanced=True)
+pc.defineParameter(
+    "controlPlaneCount","Control Plane Node Count",
+    portal.ParameterType.INTEGER,3,
+    longDescription="Number of nodes (starting at node-0) that run the Kubernetes control plane.  etcd runs on the first max(3, controlPlaneCount) nodes (1 for clusters with fewer than 3 nodes).  Unless Kube Master is Worker is set, control-plane nodes are not workers (they keep the control-plane NoSchedule taint), and workers start at node-<controlPlaneCount>.  Must be less than Number of Nodes for multi-node clusters; use an odd number for etcd quorum.",
     advanced=True)
 pc.defineParameter(
     "sslCertType","SSL Certificate Type",
@@ -243,6 +263,27 @@ if params.publicIPCount > 8:
     perr = portal.ParameterWarning(
         "You cannot request more than 8 public IP addresses, at least not without creating your own modified version of this profile!",
         ["publicIPCount"])
+    pc.reportWarning(perr)
+if params.controlPlaneCount < 1:
+    perr = portal.ParameterError(
+        "You must have at least one control plane node!",
+        ["controlPlaneCount"])
+    pc.reportError(perr)
+elif params.nodeCount > 1 and params.controlPlaneCount >= params.nodeCount \
+  and not params.kubeAllWorkers:
+    perr = portal.ParameterError(
+        "Control Plane Node Count must be less than Number of Nodes, so at least one node is left as a worker (or enable Kube Master is Worker).",
+        ["controlPlaneCount","nodeCount","kubeAllWorkers"])
+    pc.reportError(perr)
+elif params.nodeCount > 1 and params.controlPlaneCount > params.nodeCount:
+    perr = portal.ParameterError(
+        "Control Plane Node Count cannot exceed Number of Nodes.",
+        ["controlPlaneCount","nodeCount"])
+    pc.reportError(perr)
+elif params.nodeCount > 1 and params.controlPlaneCount % 2 == 0:
+    perr = portal.ParameterWarning(
+        "An even Control Plane Node Count gives no extra fault tolerance; consider an odd number.",
+        ["controlPlaneCount"])
     pc.reportWarning(perr)
 if params.kubeDoMetalLB and params.publicIPCount < 1:
     perr = portal.ParameterWarning(
