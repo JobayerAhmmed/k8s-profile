@@ -271,15 +271,13 @@ if params.controlPlaneCount < 1:
     pc.reportError(perr)
 elif params.nodeCount > 1 and params.controlPlaneCount >= params.nodeCount \
   and not params.kubeAllWorkers:
-    perr = portal.ParameterError(
-        "Control Plane Node Count must be less than Number of Nodes, so at least one node is left as a worker (or enable Kube Master is Worker).",
-        ["controlPlaneCount","nodeCount","kubeAllWorkers"])
-    pc.reportError(perr)
-elif params.nodeCount > 1 and params.controlPlaneCount > params.nodeCount:
-    perr = portal.ParameterError(
-        "Control Plane Node Count cannot exceed Number of Nodes.",
+    # Not an error: the portal evaluates the defaults (3 nodes, 3 control
+    # plane) before the user edits anything, and setup-kubespray.sh handles
+    # this case by making every node (up to nodeCount) a worker as well.
+    perr = portal.ParameterWarning(
+        "Control Plane Node Count (%d) leaves no dedicated worker among %d nodes: all nodes will be both control plane and worker.  Increase Number of Nodes, or lower Control Plane Node Count, to keep the control plane free of workloads." % (min(params.controlPlaneCount,params.nodeCount),params.nodeCount),
         ["controlPlaneCount","nodeCount"])
-    pc.reportError(perr)
+    pc.reportWarning(perr)
 elif params.nodeCount > 1 and params.controlPlaneCount % 2 == 0:
     perr = portal.ParameterWarning(
         "An even Control Plane Node Count gives no extra fault tolerance; consider an odd number.",
